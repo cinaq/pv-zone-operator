@@ -29,8 +29,34 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run tests
-        run: go test -v ./...
+      - name: Run tests with coverage
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+        
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.txt
+          
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.txt
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          
+      - name: Generate HTML coverage report
+        run: |
+          go install github.com/axw/gocov/gocov@latest
+          go install github.com/matm/gocov-html/cmd/gocov-html@latest
+          gocov convert coverage.txt > coverage.json
+          gocov-html coverage.json > coverage.html
+          
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-report
+          path: coverage.html
 
   build:
     name: Build Docker image
@@ -48,6 +74,6 @@ jobs:
         with:
           context: .
           push: false
-          tags: cinaq/pv-zone-operator:latest
+          tags: cinaq/pv-labels-operator:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

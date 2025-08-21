@@ -1,5 +1,7 @@
 # PV Labels Operator
 
+[![codecov](https://codecov.io/gh/cinaq/pv-labels-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/cinaq/pv-labels-operator)
+
 Kubernetes [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) that automatically labels [PersistentVolumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) with topology information based on the node where the pod using the PV is running. This is needed in the scenario that [CSI](https://kubernetes.io/docs/concepts/storage/volumes/#csi) provisioner itself does not set these labels. This is the case in [OVH Cloud](https://www.ovhcloud.com/). Perhaps also applicable in other vendors or environments. 
 
 The [topology labels](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode) are important for Kubernetes scheduler to schedule pods in the right zone. Otherwise pods get deadlocked while waiting for a volume to mount that will never succeed.

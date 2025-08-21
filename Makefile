@@ -16,6 +16,15 @@ all: test docker-build
 test: fmt vet
 	go test -v ./...
 
+# Run tests with coverage
+test-coverage: fmt vet
+	go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+	go tool cover -func=coverage.txt
+
+# Generate HTML coverage report
+coverage-html: test-coverage
+	go tool cover -html=coverage.txt -o coverage.html
+
 # Run against the configured Kubernetes cluster in ~/.kube/config
 run: generate fmt vet manifests
 	go run ./main.go

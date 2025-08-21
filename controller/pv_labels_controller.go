@@ -24,7 +24,7 @@ const (
 	// TopologyRegionLabel is the label key for region information
 	TopologyRegionLabel = "topology.kubernetes.io/region"
 	// ControllerName is the name of this controller
-ControllerName = "pv-labels-operator"
+	ControllerName = "pv-labels-operator"
 )
 
 // PVLabelsController is the controller implementation for labeling PVs with topology information

@@ -42,19 +42,16 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func (f *fixture) newController() (*PVZoneController, kubeinformers.SharedInformerFactory) {
+func (f *fixture) newController() (*PVLabelsController, kubeinformers.SharedInformerFactory) {
 	f.kubeClient = k8sfake.NewSimpleClientset(f.kubeObjects...)
 
 	// Create a shared informer factory for the tests
-	// This is only used for compatibility with the test framework
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(f.kubeClient, 0)
 
-	controller := &PVZoneController{
+	controller := &PVLabelsController{
 		kubeClient:   f.kubeClient,
 		resyncPeriod: 10 * time.Minute,
 	}
-
-	// No need to add objects to informers since we're using direct API calls now
 
 	return controller, kubeInformerFactory
 }
@@ -114,8 +111,7 @@ func (f *fixture) runController(podName string, startInformers bool, expectError
 		f.t.Error("expected error processing resource, got nil")
 	}
 
-	// Since we're now using direct API calls, we only care about the update actions
-	// We'll filter out all the get/list actions and just check the updates
+	// Filter actions to only include updates
 	var updateActions []core.Action
 	for _, action := range f.kubeClient.Actions() {
 		if action.GetVerb() == "update" {
@@ -127,9 +123,16 @@ func (f *fixture) runController(podName string, startInformers bool, expectError
 	if len(f.kubeActions) != len(updateActions) {
 		if len(updateActions) > 0 {
 			f.t.Errorf("Expected %d update actions, got %d", len(f.kubeActions), len(updateActions))
+			for _, action := range updateActions {
+				f.t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+			}
 		} else if len(f.kubeActions) > 0 {
 			// If we expected updates but got none, that's an error
 			f.t.Errorf("Expected %d update actions, got none", len(f.kubeActions))
+			// Log all actions to help debug
+			for _, action := range f.kubeClient.Actions() {
+				f.t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+			}
 		}
 		return
 	}
@@ -829,6 +832,9 @@ func TestFindPodsUsingPVC(t *testing.T) {
 	// Verify the correct pods were found
 	if len(pods) != 2 {
 		t.Errorf("Expected 2 pods using PVC, got %d", len(pods))
+		for _, pod := range pods {
+			t.Logf("Found pod: %s/%s", pod.Namespace, pod.Name)
+		}
 	}
 
 	// Create a map of pod names for easier verification
@@ -1026,11 +1032,6 @@ func TestPeriodicScanAllPods(t *testing.T) {
 		},
 	}
 
-	f.nodeLister = append(f.nodeLister, node1, node2)
-	f.pvLister = append(f.pvLister, pv1, pv2)
-	f.pvcLister = append(f.pvcLister, pvc1, pvc2)
-	f.podLister = append(f.podLister, pod1, pod2, podNotReady)
-
 	f.kubeObjects = append(f.kubeObjects, node1, node2, pv1, pv2, pvc1, pvc2, pod1, pod2, podNotReady)
 
 	// Expected updates to PVs with zone labels
@@ -1072,7 +1073,10 @@ func TestPeriodicScanAllPods(t *testing.T) {
 
 	// Verify we have exactly 2 update actions
 	if len(updateActions) != 2 {
-		f.t.Errorf("Expected 2 update actions, got %d", len(updateActions))
+		t.Errorf("Expected 2 update actions, got %d", len(updateActions))
+		for _, action := range f.kubeClient.Actions() {
+			t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+		}
 		return
 	}
 
@@ -1080,33 +1084,33 @@ func TestPeriodicScanAllPods(t *testing.T) {
 	for _, action := range updateActions {
 		// Verify it's an update action on persistentvolumes
 		if !action.Matches("update", "persistentvolumes") {
-			f.t.Errorf("Expected update action on persistentvolumes, got %s %s", action.GetVerb(), action.GetResource().Resource)
+			t.Errorf("Expected update action on persistentvolumes, got %s %s", action.GetVerb(), action.GetResource().Resource)
 			continue
 		}
 
 		// Get the updated PV
 		updateAction, ok := action.(core.UpdateAction)
 		if !ok {
-			f.t.Errorf("Action is not an UpdateAction: %T", action)
+			t.Errorf("Action is not an UpdateAction: %T", action)
 			continue
 		}
 
 		updatedPV, ok := updateAction.GetObject().(*corev1.PersistentVolume)
 		if !ok {
-			f.t.Errorf("Updated object is not a PV: %T", updateAction.GetObject())
+			t.Errorf("Updated object is not a PV: %T", updateAction.GetObject())
 			continue
 		}
 
 		// Check if it matches one of our expected PVs
 		expectedPV, found := expectedPVs[updatedPV.Name]
 		if !found {
-			f.t.Errorf("Unexpected PV update: %s", updatedPV.Name)
+			t.Errorf("Unexpected PV update: %s", updatedPV.Name)
 			continue
 		}
 
 		// Check if the zone label is correct
 		if updatedPV.Labels[TopologyZoneLabel] != expectedPV.Labels[TopologyZoneLabel] {
-			f.t.Errorf("PV %s has wrong zone label: expected %s, got %s",
+			t.Errorf("PV %s has wrong zone label: expected %s, got %s",
 				updatedPV.Name,
 				expectedPV.Labels[TopologyZoneLabel],
 				updatedPV.Labels[TopologyZoneLabel])
@@ -1119,7 +1123,7 @@ func TestPeriodicScanAllPods(t *testing.T) {
 	// Make sure all expected PVs were updated
 	if len(expectedPVs) > 0 {
 		for name := range expectedPVs {
-			f.t.Errorf("Expected PV %s was not updated", name)
+			t.Errorf("Expected PV %s was not updated", name)
 		}
 	}
 }
