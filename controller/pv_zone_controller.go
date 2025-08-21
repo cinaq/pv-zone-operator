@@ -16,6 +16,8 @@ import (
 const (
 	// TopologyZoneLabel is the label key for zone information
 	TopologyZoneLabel = "topology.kubernetes.io/zone"
+	// TopologyRegionLabel is the label key for region information
+	TopologyRegionLabel = "topology.kubernetes.io/region"
 	// ControllerName is the name of this controller
 	ControllerName = "pv-zone-operator"
 )
@@ -104,9 +106,19 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 	}
 
 	// Get the zone from the node
-	zone, ok := node.Labels[TopologyZoneLabel]
-	if !ok {
+	zone, zoneOk := node.Labels[TopologyZoneLabel]
+	if !zoneOk {
 		klog.Warningf("Node %s does not have zone label %s", node.Name, TopologyZoneLabel)
+	}
+
+	// Get the region from the node
+	region, regionOk := node.Labels[TopologyRegionLabel]
+	if !regionOk {
+		klog.Warningf("Node %s does not have region label %s", node.Name, TopologyRegionLabel)
+	}
+
+	// Skip if neither zone nor region is available
+	if !zoneOk && !regionOk {
 		return nil
 	}
 
@@ -132,10 +144,10 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 				continue
 			}
 
-			// Update the PV with the zone label
-			err = c.updatePVWithZoneLabel(pv, zone)
+			// Update the PV with topology labels
+			err = c.updatePVWithTopologyLabels(pv, zone, region)
 			if err != nil {
-				klog.Errorf("Error updating PV %s with zone label: %v", pv.Name, err)
+				klog.Errorf("Error updating PV %s with topology labels: %v", pv.Name, err)
 				continue
 			}
 		}
@@ -178,9 +190,19 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 	}
 
 	// Get the zone from the node
-	zone, ok := node.Labels[TopologyZoneLabel]
-	if !ok {
+	zone, zoneOk := node.Labels[TopologyZoneLabel]
+	if !zoneOk {
 		klog.Warningf("Node %s does not have zone label %s", node.Name, TopologyZoneLabel)
+	}
+
+	// Get the region from the node
+	region, regionOk := node.Labels[TopologyRegionLabel]
+	if !regionOk {
+		klog.Warningf("Node %s does not have region label %s", node.Name, TopologyRegionLabel)
+	}
+
+	// Skip if neither zone nor region is available
+	if !zoneOk && !regionOk {
 		return nil
 	}
 
@@ -190,8 +212,8 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 		return fmt.Errorf("error getting PV %s: %v", pvc.Spec.VolumeName, err)
 	}
 
-	// Update the PV with the zone label
-	return c.updatePVWithZoneLabel(pv, zone)
+	// Update the PV with topology labels
+	return c.updatePVWithTopologyLabels(pv, zone, region)
 }
 
 // findPodsUsingPVC finds all pods using the given PVC
@@ -215,13 +237,10 @@ func (c *PVZoneController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) (
 	return podsUsingPVC, nil
 }
 
-// updatePVWithZoneLabel updates the PV with the zone label
-func (c *PVZoneController) updatePVWithZoneLabel(pv *corev1.PersistentVolume, zone string) error {
-	// Check if the PV already has the correct zone label
-	if value, ok := pv.Labels[TopologyZoneLabel]; ok && value == zone {
-		klog.V(4).Infof("PV %s already has correct zone label %s=%s", pv.Name, TopologyZoneLabel, zone)
-		return nil
-	}
+// updatePVWithTopologyLabels updates the PV with the zone and region labels
+func (c *PVZoneController) updatePVWithTopologyLabels(pv *corev1.PersistentVolume, zone, region string) error {
+	// Check if the PV already has the correct topology labels
+	needsUpdate := false
 
 	// Clone the PV to avoid modifying the cache
 	pvCopy := pv.DeepCopy()
@@ -231,8 +250,27 @@ func (c *PVZoneController) updatePVWithZoneLabel(pv *corev1.PersistentVolume, zo
 		pvCopy.Labels = make(map[string]string)
 	}
 
-	// Set the zone label
-	pvCopy.Labels[TopologyZoneLabel] = zone
+	// Check and set the zone label if provided
+	if zone != "" {
+		if value, ok := pv.Labels[TopologyZoneLabel]; !ok || value != zone {
+			pvCopy.Labels[TopologyZoneLabel] = zone
+			needsUpdate = true
+		}
+	}
+
+	// Check and set the region label if provided
+	if region != "" {
+		if value, ok := pv.Labels[TopologyRegionLabel]; !ok || value != region {
+			pvCopy.Labels[TopologyRegionLabel] = region
+			needsUpdate = true
+		}
+	}
+
+	// If no update is needed, return early
+	if !needsUpdate {
+		klog.V(4).Infof("PV %s already has correct topology labels", pv.Name)
+		return nil
+	}
 
 	// Update the PV
 	_, err := c.kubeClient.CoreV1().PersistentVolumes().Update(context.TODO(), pvCopy, metav1.UpdateOptions{})
@@ -240,7 +278,7 @@ func (c *PVZoneController) updatePVWithZoneLabel(pv *corev1.PersistentVolume, zo
 		return fmt.Errorf("error updating PV %s: %v", pv.Name, err)
 	}
 
-	klog.Infof("Successfully updated PV %s with zone label %s=%s", pv.Name, TopologyZoneLabel, zone)
+	klog.Infof("Successfully updated PV %s with topology labels", pv.Name)
 	return nil
 }
 
