@@ -1,5 +1,6 @@
 # PV Labels Operator
 
+[![CI](https://github.com/cinaq/pv-labels-operator/actions/workflows/ci.yaml/badge.svg)](https://github.com/cinaq/pv-labels-operator/actions/workflows/ci.yaml)
 [![codecov](https://codecov.io/gh/cinaq/pv-labels-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/cinaq/pv-labels-operator)
 
 Kubernetes [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/) that automatically labels [PersistentVolumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) with topology information based on the node where the pod using the PV is running. This is needed in the scenario that [CSI](https://kubernetes.io/docs/concepts/storage/volumes/#csi) provisioner itself does not set these labels. This is the case in [OVH Cloud](https://www.ovhcloud.com/). Perhaps also applicable in other vendors or environments. 
@@ -85,6 +86,14 @@ Participation in the Kubernetes community is governed by the [Kubernetes Code of
 ### Contributing
 
 If you're interested in contributing to this project, please see the [CONTRIBUTING.md](CONTRIBUTING.md) file.
+
+## CI/CD Workflows
+
+This project uses GitHub Actions for continuous integration and deployment:
+
+- **CI Workflow**: Runs tests and builds Docker images for the main branch and PRs targeting main.
+- **Feature Branch Workflow**: Runs tests and builds Docker images for all other branches and PRs.
+- **Release Workflow**: Creates GitHub releases and publishes Docker images when a new tag is pushed.
 
 [owners]: https://git.k8s.io/community/contributors/guide/owners.md
 [Creative Commons 4.0]: https://git.k8s.io/website/LICENSE
