@@ -1,6 +1,6 @@
 module sigs.k8s.io/pv-zone-operator
 
-go 1.24.0
+go 1.24.4
 
 require (
 	k8s.io/api v0.33.4
