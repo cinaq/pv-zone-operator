@@ -24,11 +24,11 @@ const (
 	// TopologyRegionLabel is the label key for region information
 	TopologyRegionLabel = "topology.kubernetes.io/region"
 	// ControllerName is the name of this controller
-	ControllerName = "pv-zone-operator"
+ControllerName = "pv-labels-operator"
 )
 
-// PVZoneController is the controller implementation for labeling PVs with zone information
-type PVZoneController struct {
+// PVLabelsController is the controller implementation for labeling PVs with topology information
+type PVLabelsController struct {
 	kubeClient kubernetes.Interface
 
 	// resyncPeriod is the period for full resync of all pods
@@ -43,11 +43,11 @@ type PVZoneController struct {
 	workqueue workqueue.RateLimitingInterface
 }
 
-// NewPVZoneController creates a new PVZoneController
-func NewPVZoneController(
+// NewPVLabelsController creates a new PVLabelsController
+func NewPVLabelsController(
 	kubeClient kubernetes.Interface,
 	resyncPeriod time.Duration,
-) *PVZoneController {
+) *PVLabelsController {
 	// Create pod informer
 	podInformer := cache.NewSharedIndexInformer(
 		&cache.ListWatch{
@@ -63,13 +63,13 @@ func NewPVZoneController(
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 	)
 
-	controller := &PVZoneController{
+	controller := &PVLabelsController{
 		kubeClient:   kubeClient,
 		resyncPeriod: resyncPeriod,
 		podInformer:  podInformer,
 		podLister:    v1.NewPodLister(podInformer.GetIndexer()),
 		podsSynced:   podInformer.HasSynced,
-		workqueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PVZoneController"),
+		workqueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PVLabelsController"),
 	}
 
 	// Set up event handlers for pod informer
@@ -90,12 +90,12 @@ func NewPVZoneController(
 }
 
 // Run starts the controller and runs until stopCh is closed
-func (c *PVZoneController) Run(stopCh <-chan struct{}) error {
+func (c *PVLabelsController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
 	// Start the informer factories to begin populating the informer caches
-	klog.Info("Starting PV Zone controller")
+	klog.Info("Starting PV Labels controller")
 
 	// Start the pod informer
 	go c.podInformer.Run(stopCh)
@@ -121,8 +121,8 @@ func (c *PVZoneController) Run(stopCh <-chan struct{}) error {
 	return nil
 }
 
-// periodicScanAllPods scans all pods in the cluster and updates PVs with zone information
-func (c *PVZoneController) periodicScanAllPods() {
+// periodicScanAllPods scans all pods in the cluster and updates PVs with topology information
+func (c *PVLabelsController) periodicScanAllPods() {
 	klog.Info("Starting periodic scan of all pods")
 
 	// List all pods in the cluster
@@ -153,14 +153,14 @@ func (c *PVZoneController) periodicScanAllPods() {
 
 // runWorker is a long-running function that will continually call the
 // processNextWorkItem function in order to read and process a message on the workqueue.
-func (c *PVZoneController) runWorker() {
+func (c *PVLabelsController) runWorker() {
 	for c.processNextWorkItem() {
 	}
 }
 
 // processNextWorkItem will read a single work item off the workqueue and
 // attempt to process it, by calling the processPod method.
-func (c *PVZoneController) processNextWorkItem() bool {
+func (c *PVLabelsController) processNextWorkItem() bool {
 	obj, shutdown := c.workqueue.Get()
 
 	if shutdown {
@@ -214,7 +214,7 @@ func (c *PVZoneController) processNextWorkItem() bool {
 
 // enqueuePod takes a Pod resource and converts it into a namespace/name
 // string which is then put onto the work queue.
-func (c *PVZoneController) enqueuePod(obj interface{}) {
+func (c *PVLabelsController) enqueuePod(obj interface{}) {
 	var key string
 	var err error
 	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
@@ -225,7 +225,7 @@ func (c *PVZoneController) enqueuePod(obj interface{}) {
 }
 
 // processPodByKey processes a pod from the key in the workqueue
-func (c *PVZoneController) processPodByKey(key string) error {
+func (c *PVLabelsController) processPodByKey(key string) error {
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -244,7 +244,7 @@ func (c *PVZoneController) processPodByKey(key string) error {
 }
 
 // processPod processes a pod to find its PVCs and label the corresponding PVs
-func (c *PVZoneController) processPod(pod *corev1.Pod) error {
+func (c *PVLabelsController) processPod(pod *corev1.Pod) error {
 	// Skip if the pod is not in ready state
 	if !isPodReady(pod) {
 		return nil
@@ -308,7 +308,7 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 }
 
 // processPVC processes a PVC to label the corresponding PV
-func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
+func (c *PVLabelsController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 	if pvc.Spec.VolumeName == "" {
 		klog.Warningf("PVC %s/%s does not have a bound PV", pvc.Namespace, pvc.Name)
 		return nil
@@ -368,7 +368,7 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 }
 
 // findPodsUsingPVC finds all pods using the given PVC
-func (c *PVZoneController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) ([]corev1.Pod, error) {
+func (c *PVLabelsController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) ([]corev1.Pod, error) {
 	podList, err := c.kubeClient.CoreV1().Pods(pvc.Namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing pods: %v", err)
@@ -389,7 +389,7 @@ func (c *PVZoneController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) (
 }
 
 // updatePVWithTopologyLabels updates the PV with the zone and region labels
-func (c *PVZoneController) updatePVWithTopologyLabels(pv *corev1.PersistentVolume, zone, region string) error {
+func (c *PVLabelsController) updatePVWithTopologyLabels(pv *corev1.PersistentVolume, zone, region string) error {
 	// Check if the PV already has the correct topology labels
 	needsUpdate := false
 

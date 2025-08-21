@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: pv-zone-operator
+  name: pv-labels-operator
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pv-zone-operator
+  name: pv-labels-operator
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -26,37 +26,37 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pv-zone-operator
+  name: pv-labels-operator
 subjects:
 - kind: ServiceAccount
-  name: pv-zone-operator
+  name: pv-labels-operator
   namespace: kube-system
 roleRef:
   kind: ClusterRole
-  name: pv-zone-operator
+  name: pv-labels-operator
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pv-zone-operator
+  name: pv-labels-operator
   namespace: kube-system
   labels:
-    app: pv-zone-operator
+    app: pv-labels-operator
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pv-zone-operator
+      app: pv-labels-operator
   template:
     metadata:
       labels:
-        app: pv-zone-operator
+        app: pv-labels-operator
     spec:
-      serviceAccountName: pv-zone-operator
+      serviceAccountName: pv-labels-operator
       containers:
-      - name: pv-zone-operator
-        image: docker.io/cinaq/pv-zone-operator:latest
+      - name: pv-labels-operator
+        image: docker.io/cinaq/pv-labels-operator:0.1.1
         args:
         - --resync-period=60m
         resources:

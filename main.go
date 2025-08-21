@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
-	"sigs.k8s.io/pv-zone-operator/controller"
+	"sigs.k8s.io/pv-labels-operator/controller"
 )
 
 var (
@@ -48,10 +48,10 @@ func main() {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	pvController := controller.NewPVZoneController(kubeClient, resyncPeriod)
+	pvController := controller.NewPVLabelsController(kubeClient, resyncPeriod)
 
 	// Start the controller
-	klog.Info("Starting the PV Zone Controller")
+	klog.Info("Starting the PV Labels Controller")
 	if err := pvController.Run(stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())
 	}
