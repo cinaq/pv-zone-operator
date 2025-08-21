@@ -56,10 +56,9 @@ spec:
       serviceAccountName: pv-zone-operator
       containers:
       - name: pv-zone-operator
-        image: docker.io/cinaq/pv-zone-operator:v0.1.0
+        image: docker.io/cinaq/pv-zone-operator:latest
         args:
-        - --kubeconfig=/etc/kubernetes/kubeconfig
-        - --resync-period=10m
+        - --resync-period=60m
         resources:
           limits:
             cpu: 100m

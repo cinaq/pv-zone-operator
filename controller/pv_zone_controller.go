@@ -6,16 +6,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
 
@@ -30,21 +24,8 @@ const (
 type PVZoneController struct {
 	kubeClient kubernetes.Interface
 
-	podLister       corelisters.PodLister
-	podListerSynced cache.InformerSynced
-
-	pvLister       corelisters.PersistentVolumeLister
-	pvListerSynced cache.InformerSynced
-
-	pvcLister       corelisters.PersistentVolumeClaimLister
-	pvcListerSynced cache.InformerSynced
-
-	nodeLister       corelisters.NodeLister
-	nodeListerSynced cache.InformerSynced
-
-	// workqueue is a rate limited work queue. This is used to queue work to be
-	// processed instead of performing it as soon as a change happens.
-	workqueue workqueue.RateLimitingInterface
+	// resyncPeriod is the period for full resync of all pods
+	resyncPeriod time.Duration
 }
 
 // NewPVZoneController creates a new PVZoneController
@@ -52,239 +33,62 @@ func NewPVZoneController(
 	kubeClient kubernetes.Interface,
 	resyncPeriod time.Duration,
 ) *PVZoneController {
-	// Create informer factories
-	informerFactory := coreinformers.NewFilteredPodInformer(
-		kubeClient,
-		metav1.NamespaceAll,
-		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		nil,
-	)
-
-	pvInformer := coreinformers.NewFilteredPersistentVolumeInformer(
-		kubeClient,
-		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		nil,
-	)
-
-	pvcInformer := coreinformers.NewFilteredPersistentVolumeClaimInformer(
-		kubeClient,
-		metav1.NamespaceAll,
-		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		nil,
-	)
-
-	nodeInformer := coreinformers.NewFilteredNodeInformer(
-		kubeClient,
-		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		nil,
-	)
-
 	controller := &PVZoneController{
-		kubeClient: kubeClient,
-		workqueue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), ControllerName),
+		kubeClient:   kubeClient,
+		resyncPeriod: resyncPeriod,
 	}
-
-	klog.Info("Setting up event handlers")
-	// Set up event handlers for pod changes
-	informerFactory.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueuePod,
-		UpdateFunc: func(old, new interface{}) {
-			newPod := new.(*corev1.Pod)
-			oldPod := old.(*corev1.Pod)
-			if newPod.ResourceVersion == oldPod.ResourceVersion {
-				// Periodic resync will send update events for all known Pods.
-				// Two different versions of the same Pod will always have different RVs.
-				return
-			}
-			controller.enqueuePod(new)
-		},
-	})
-
-	// Set up event handlers for PVC changes
-	pvcInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueuePVC,
-		UpdateFunc: func(old, new interface{}) {
-			newPVC := new.(*corev1.PersistentVolumeClaim)
-			oldPVC := old.(*corev1.PersistentVolumeClaim)
-			if newPVC.ResourceVersion == oldPVC.ResourceVersion {
-				return
-			}
-			controller.enqueuePVC(new)
-		},
-	})
-
-	controller.podLister = corelisters.NewPodLister(informerFactory.GetIndexer())
-	controller.podListerSynced = informerFactory.HasSynced
-
-	controller.pvLister = corelisters.NewPersistentVolumeLister(pvInformer.GetIndexer())
-	controller.pvListerSynced = pvInformer.HasSynced
-
-	controller.pvcLister = corelisters.NewPersistentVolumeClaimLister(pvcInformer.GetIndexer())
-	controller.pvcListerSynced = pvcInformer.HasSynced
-
-	controller.nodeLister = corelisters.NewNodeLister(nodeInformer.GetIndexer())
-	controller.nodeListerSynced = nodeInformer.HasSynced
 
 	return controller
 }
 
-// Run will set up the event handlers for types we are interested in, as well
-// as syncing informer caches and starting workers. It will block until stopCh
-// is closed, at which point it will shutdown the workqueue and wait for
-// workers to finish processing their current work items.
-func (c *PVZoneController) Run(workers int, stopCh <-chan struct{}) error {
+// Run starts the controller and runs until stopCh is closed
+func (c *PVZoneController) Run(stopCh <-chan struct{}) error {
 	defer runtime.HandleCrash()
-	defer c.workqueue.ShutDown()
 
 	// Start the informer factories to begin populating the informer caches
 	klog.Info("Starting PV Zone controller")
 
-	// Wait for the caches to be synced before starting workers
-	klog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(stopCh, c.podListerSynced, c.pvListerSynced, c.pvcListerSynced, c.nodeListerSynced); !ok {
-		return fmt.Errorf("failed to wait for caches to sync")
-	}
+	// Start periodic scanning of all pods
+	go wait.Until(c.periodicScanAllPods, c.resyncPeriod, stopCh)
+	klog.Infof("Started periodic pod scanner with period %v", c.resyncPeriod)
 
-	klog.Info("Starting workers")
-	// Launch workers to process Pod resources
-	for i := 0; i < workers; i++ {
-		go wait.Until(c.runWorker, time.Second, stopCh)
-	}
-
-	klog.Info("Started workers")
 	<-stopCh
-	klog.Info("Shutting down workers")
+	klog.Info("Shutting down controller")
 
 	return nil
 }
 
-// runWorker is a long-running function that will continually call the
-// processNextWorkItem function in order to read and process a message on the
-// workqueue.
-func (c *PVZoneController) runWorker() {
-	for c.processNextWorkItem() {
-	}
-}
+// periodicScanAllPods scans all pods in the cluster and updates PVs with zone information
+func (c *PVZoneController) periodicScanAllPods() {
+	klog.Info("Starting periodic scan of all pods")
 
-// processNextWorkItem will read a single work item off the workqueue and
-// attempt to process it, by calling the syncHandler.
-func (c *PVZoneController) processNextWorkItem() bool {
-	obj, shutdown := c.workqueue.Get()
-
-	if shutdown {
-		return false
-	}
-
-	// We wrap this block in a func so we can defer c.workqueue.Done.
-	err := func(obj interface{}) error {
-		// We call Done here so the workqueue knows we have finished
-		// processing this item. We also must remember to call Forget if we
-		// do not want this work item being re-queued. For example, we do
-		// not call Forget if a transient error occurs, instead the item is
-		// put back on the workqueue and attempted again after a back-off
-		// period.
-		defer c.workqueue.Done(obj)
-		var key string
-		var ok bool
-		// We expect strings to come off the workqueue. These are of the
-		// form namespace/name. We do this as the delayed nature of the
-		// workqueue means the items in the informer cache may actually be
-		// more up to date that when the item was initially put onto the
-		// workqueue.
-		if key, ok = obj.(string); !ok {
-			// As the item in the workqueue is actually invalid, we call
-			// Forget here else we'd go into a loop of attempting to
-			// process a work item that is invalid.
-			c.workqueue.Forget(obj)
-			runtime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
-			return nil
-		}
-		// Run the syncHandler, passing it the namespace/name string of the
-		// Pod resource to be synced.
-		if err := c.syncHandler(key); err != nil {
-			// Put the item back on the workqueue to handle any transient errors.
-			c.workqueue.AddRateLimited(key)
-			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
-		}
-		// Finally, if no error occurs we Forget this item so it does not
-		// get queued again until another change happens.
-		c.workqueue.Forget(obj)
-		klog.Infof("Successfully synced '%s'", key)
-		return nil
-	}(obj)
-
+	// List all pods in the cluster
+	podList, err := c.kubeClient.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		runtime.HandleError(err)
-		return true
-	}
-
-	return true
-}
-
-// syncHandler compares the actual state with the desired, and attempts to
-// converge the two. It then updates the Status block of the Pod resource
-// with the current status of the resource.
-func (c *PVZoneController) syncHandler(key string) error {
-	// Convert the namespace/name string into a distinct namespace and name
-	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		runtime.HandleError(fmt.Errorf("invalid resource key: %s", key))
-		return nil
-	}
-
-	// Check if this is a pod or PVC key
-	if namespace != "" {
-		// This is a namespaced resource, likely a Pod or PVC
-		// Try to get the Pod first
-		pod, err := c.podLister.Pods(namespace).Get(name)
-		if err == nil {
-			// It's a pod, process it
-			return c.processPod(pod)
-		} else if !errors.IsNotFound(err) {
-			return err
-		}
-
-		// Try to get the PVC
-		pvc, err := c.pvcLister.PersistentVolumeClaims(namespace).Get(name)
-		if err == nil {
-			// It's a PVC, process it
-			return c.processPVC(pvc)
-		} else if !errors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	// Not found or not a resource we care about
-	return nil
-}
-
-// enqueuePod takes a Pod resource and converts it into a namespace/name
-// string which is then put onto the work queue.
-func (c *PVZoneController) enqueuePod(obj interface{}) {
-	var key string
-	var err error
-	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
-		runtime.HandleError(err)
+		klog.Errorf("Error listing pods: %v", err)
 		return
 	}
-	c.workqueue.Add(key)
+
+	klog.Infof("Processing %d pods in periodic scan", len(podList.Items))
+
+	// Process each pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Skip if the pod is not in ready state
+		if !isPodReady(pod) {
+			continue
+		}
+
+		// Process the pod to update PVs with zone information
+		if err := c.processPod(pod); err != nil {
+			klog.Errorf("Error processing pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		}
+	}
+
+	klog.Info("Completed periodic scan of all pods")
 }
 
-// enqueuePVC takes a PVC resource and converts it into a namespace/name
-// string which is then put onto the work queue.
-func (c *PVZoneController) enqueuePVC(obj interface{}) {
-	var key string
-	var err error
-	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
-		runtime.HandleError(err)
-		return
-	}
-	c.workqueue.Add(key)
-}
+// We no longer need worker or queue processing functions as we're using polling
 
 // processPod processes a pod to find its PVCs and label the corresponding PVs
 func (c *PVZoneController) processPod(pod *corev1.Pod) error {
@@ -294,7 +98,7 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 	}
 
 	// Get the node to find the zone
-	node, err := c.nodeLister.Get(pod.Spec.NodeName)
+	node, err := c.kubeClient.CoreV1().Nodes().Get(context.TODO(), pod.Spec.NodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("error getting node %s: %v", pod.Spec.NodeName, err)
 	}
@@ -309,7 +113,8 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 	// Process each volume in the pod
 	for _, volume := range pod.Spec.Volumes {
 		if volume.PersistentVolumeClaim != nil {
-			pvc, err := c.pvcLister.PersistentVolumeClaims(pod.Namespace).Get(volume.PersistentVolumeClaim.ClaimName)
+			pvc, err := c.kubeClient.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(
+				context.TODO(), volume.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
 			if err != nil {
 				klog.Warningf("Error getting PVC %s/%s: %v", pod.Namespace, volume.PersistentVolumeClaim.ClaimName, err)
 				continue
@@ -321,7 +126,7 @@ func (c *PVZoneController) processPod(pod *corev1.Pod) error {
 			}
 
 			// Get the PV
-			pv, err := c.pvLister.Get(pvc.Spec.VolumeName)
+			pv, err := c.kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
 			if err != nil {
 				klog.Warningf("Error getting PV %s: %v", pvc.Spec.VolumeName, err)
 				continue
@@ -354,9 +159,9 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 
 	// Find a ready pod using this PVC
 	var readyPod *corev1.Pod
-	for _, pod := range pods {
-		if isPodReady(pod) {
-			readyPod = pod
+	for i := range pods {
+		if isPodReady(&pods[i]) {
+			readyPod = &pods[i]
 			break
 		}
 	}
@@ -367,7 +172,7 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 	}
 
 	// Get the node to find the zone
-	node, err := c.nodeLister.Get(readyPod.Spec.NodeName)
+	node, err := c.kubeClient.CoreV1().Nodes().Get(context.TODO(), readyPod.Spec.NodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("error getting node %s: %v", readyPod.Spec.NodeName, err)
 	}
@@ -380,7 +185,7 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 	}
 
 	// Get the PV
-	pv, err := c.pvLister.Get(pvc.Spec.VolumeName)
+	pv, err := c.kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("error getting PV %s: %v", pvc.Spec.VolumeName, err)
 	}
@@ -390,17 +195,18 @@ func (c *PVZoneController) processPVC(pvc *corev1.PersistentVolumeClaim) error {
 }
 
 // findPodsUsingPVC finds all pods using the given PVC
-func (c *PVZoneController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) ([]*corev1.Pod, error) {
-	pods, err := c.podLister.Pods(pvc.Namespace).List(labels.Everything())
+func (c *PVZoneController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim) ([]corev1.Pod, error) {
+	podList, err := c.kubeClient.CoreV1().Pods(pvc.Namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing pods: %v", err)
 	}
 
-	var podsUsingPVC []*corev1.Pod
-	for _, pod := range pods {
+	var podsUsingPVC []corev1.Pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
 		for _, volume := range pod.Spec.Volumes {
 			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvc.Name {
-				podsUsingPVC = append(podsUsingPVC, pod)
+				podsUsingPVC = append(podsUsingPVC, *pod)
 				break
 			}
 		}

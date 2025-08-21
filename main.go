@@ -27,7 +27,7 @@ var (
 func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	flag.DurationVar(&resyncPeriod, "resync-period", 10*time.Minute, "Resync period for the controller.")
+	flag.DurationVar(&resyncPeriod, "resync-period", 60*time.Minute, "Resync period for the controller.")
 	flag.Parse()
 
 	klog.InitFlags(nil)
@@ -52,7 +52,7 @@ func main() {
 
 	// Start the controller
 	klog.Info("Starting the PV Zone Controller")
-	if err := pvController.Run(2, stopCh); err != nil {
+	if err := pvController.Run(stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())
 	}
 }
