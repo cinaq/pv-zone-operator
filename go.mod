@@ -1,4 +1,4 @@
-module sigs.k8s.io/pv-zone-operator
+module sigs.k8s.io/pv-labels-operator
 
 go 1.24.4
 

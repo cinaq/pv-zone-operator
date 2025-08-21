@@ -15,7 +15,7 @@ COPY controller/ controller/
 COPY main.go main.go
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -o pv-zone-operator .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -o pv-labels-operator .
 
 # Use distroless as minimal base image to package the binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -24,4 +24,4 @@ WORKDIR /
 COPY --from=builder /workspace/ .
 USER nonroot:nonroot
 
-ENTRYPOINT ["/pv-zone-operator"]
+ENTRYPOINT ["/pv-labels-operator"]

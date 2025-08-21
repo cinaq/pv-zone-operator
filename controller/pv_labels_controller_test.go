@@ -42,19 +42,16 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func (f *fixture) newController() (*PVZoneController, kubeinformers.SharedInformerFactory) {
+func (f *fixture) newController() (*PVLabelsController, kubeinformers.SharedInformerFactory) {
 	f.kubeClient = k8sfake.NewSimpleClientset(f.kubeObjects...)
 
 	// Create a shared informer factory for the tests
-	// This is only used for compatibility with the test framework
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(f.kubeClient, 0)
 
-	controller := &PVZoneController{
+	controller := &PVLabelsController{
 		kubeClient:   f.kubeClient,
 		resyncPeriod: 10 * time.Minute,
 	}
-
-	// No need to add objects to informers since we're using direct API calls now
 
 	return controller, kubeInformerFactory
 }
@@ -114,8 +111,7 @@ func (f *fixture) runController(podName string, startInformers bool, expectError
 		f.t.Error("expected error processing resource, got nil")
 	}
 
-	// Since we're now using direct API calls, we only care about the update actions
-	// We'll filter out all the get/list actions and just check the updates
+	// Filter actions to only include updates
 	var updateActions []core.Action
 	for _, action := range f.kubeClient.Actions() {
 		if action.GetVerb() == "update" {
@@ -127,9 +123,16 @@ func (f *fixture) runController(podName string, startInformers bool, expectError
 	if len(f.kubeActions) != len(updateActions) {
 		if len(updateActions) > 0 {
 			f.t.Errorf("Expected %d update actions, got %d", len(f.kubeActions), len(updateActions))
+			for _, action := range updateActions {
+				f.t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+			}
 		} else if len(f.kubeActions) > 0 {
 			// If we expected updates but got none, that's an error
 			f.t.Errorf("Expected %d update actions, got none", len(f.kubeActions))
+			// Log all actions to help debug
+			for _, action := range f.kubeClient.Actions() {
+				f.t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+			}
 		}
 		return
 	}
@@ -668,6 +671,198 @@ func TestProcessPVCWithReadyPod(t *testing.T) {
 	f.run("default/test-pvc")
 }
 
+func TestFindPodsUsingPVC(t *testing.T) {
+	f := newFixture(t)
+
+	// Create test resources
+	pvc1 := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pvc-1",
+			Namespace: "default",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "test-pv-1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+
+	// Create pods using the PVC
+	pod1 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-1",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-1",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1",
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-2",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-2",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1", // Same PVC as pod1
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	// Create a pod with a different PVC
+	pod3 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-3",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-3",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-2", // Different PVC
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Create a pod with no PVC
+	pod4 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-4",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-4",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Create a pod in a different namespace
+	pod5 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-5",
+			Namespace: "other-namespace",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-5",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1", // Same name as pvc1 but in different namespace
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Add objects to the fixture
+	f.kubeObjects = append(f.kubeObjects, pvc1, pod1, pod2, pod3, pod4, pod5)
+
+	// Create controller
+	controller, _ := f.newController()
+
+	// Test findPodsUsingPVC function
+	pods, err := controller.findPodsUsingPVC(pvc1)
+	if err != nil {
+		t.Errorf("Error finding pods using PVC: %v", err)
+	}
+
+	// Verify the correct pods were found
+	if len(pods) != 2 {
+		t.Errorf("Expected 2 pods using PVC, got %d", len(pods))
+		for _, pod := range pods {
+			t.Logf("Found pod: %s/%s", pod.Namespace, pod.Name)
+		}
+	}
+
+	// Create a map of pod names for easier verification
+	podNames := make(map[string]bool)
+	for _, pod := range pods {
+		podNames[pod.Name] = true
+	}
+
+	// Check that pod1 and pod2 are in the result
+	if !podNames["test-pod-1"] {
+		t.Errorf("Expected pod test-pod-1 to be found")
+	}
+	if !podNames["test-pod-2"] {
+		t.Errorf("Expected pod test-pod-2 to be found")
+	}
+
+	// Check that pod3, pod4, and pod5 are NOT in the result
+	if podNames["test-pod-3"] {
+		t.Errorf("Pod test-pod-3 should not be found (different PVC)")
+	}
+	if podNames["test-pod-4"] {
+		t.Errorf("Pod test-pod-4 should not be found (no PVC)")
+	}
+	if podNames["test-pod-5"] {
+		t.Errorf("Pod test-pod-5 should not be found (different namespace)")
+	}
+}
+
 func TestPeriodicScanAllPods(t *testing.T) {
 	f := newFixture(t)
 
@@ -837,11 +1032,6 @@ func TestPeriodicScanAllPods(t *testing.T) {
 		},
 	}
 
-	f.nodeLister = append(f.nodeLister, node1, node2)
-	f.pvLister = append(f.pvLister, pv1, pv2)
-	f.pvcLister = append(f.pvcLister, pvc1, pvc2)
-	f.podLister = append(f.podLister, pod1, pod2, podNotReady)
-
 	f.kubeObjects = append(f.kubeObjects, node1, node2, pv1, pv2, pvc1, pvc2, pod1, pod2, podNotReady)
 
 	// Expected updates to PVs with zone labels
@@ -883,7 +1073,10 @@ func TestPeriodicScanAllPods(t *testing.T) {
 
 	// Verify we have exactly 2 update actions
 	if len(updateActions) != 2 {
-		f.t.Errorf("Expected 2 update actions, got %d", len(updateActions))
+		t.Errorf("Expected 2 update actions, got %d", len(updateActions))
+		for _, action := range f.kubeClient.Actions() {
+			t.Logf("Got action: %s %s", action.GetVerb(), action.GetResource().Resource)
+		}
 		return
 	}
 
@@ -891,33 +1084,33 @@ func TestPeriodicScanAllPods(t *testing.T) {
 	for _, action := range updateActions {
 		// Verify it's an update action on persistentvolumes
 		if !action.Matches("update", "persistentvolumes") {
-			f.t.Errorf("Expected update action on persistentvolumes, got %s %s", action.GetVerb(), action.GetResource().Resource)
+			t.Errorf("Expected update action on persistentvolumes, got %s %s", action.GetVerb(), action.GetResource().Resource)
 			continue
 		}
 
 		// Get the updated PV
 		updateAction, ok := action.(core.UpdateAction)
 		if !ok {
-			f.t.Errorf("Action is not an UpdateAction: %T", action)
+			t.Errorf("Action is not an UpdateAction: %T", action)
 			continue
 		}
 
 		updatedPV, ok := updateAction.GetObject().(*corev1.PersistentVolume)
 		if !ok {
-			f.t.Errorf("Updated object is not a PV: %T", updateAction.GetObject())
+			t.Errorf("Updated object is not a PV: %T", updateAction.GetObject())
 			continue
 		}
 
 		// Check if it matches one of our expected PVs
 		expectedPV, found := expectedPVs[updatedPV.Name]
 		if !found {
-			f.t.Errorf("Unexpected PV update: %s", updatedPV.Name)
+			t.Errorf("Unexpected PV update: %s", updatedPV.Name)
 			continue
 		}
 
 		// Check if the zone label is correct
 		if updatedPV.Labels[TopologyZoneLabel] != expectedPV.Labels[TopologyZoneLabel] {
-			f.t.Errorf("PV %s has wrong zone label: expected %s, got %s",
+			t.Errorf("PV %s has wrong zone label: expected %s, got %s",
 				updatedPV.Name,
 				expectedPV.Labels[TopologyZoneLabel],
 				updatedPV.Labels[TopologyZoneLabel])
@@ -930,7 +1123,7 @@ func TestPeriodicScanAllPods(t *testing.T) {
 	// Make sure all expected PVs were updated
 	if len(expectedPVs) > 0 {
 		for name := range expectedPVs {
-			f.t.Errorf("Expected PV %s was not updated", name)
+			t.Errorf("Expected PV %s was not updated", name)
 		}
 	}
 }

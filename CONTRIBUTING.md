@@ -12,6 +12,19 @@ We have full documentation on how to get started contributing here:
 If your repo has certain guidelines for contribution, put them here ahead of the general k8s resources
 -->
 
+### Development Workflow
+
+1. Fork the repository and create a feature branch from the `main` branch
+2. Make your changes and ensure tests pass with `go test -v ./...`
+3. Submit a pull request to the `main` branch
+
+When you submit a pull request or push to a feature branch, the CI workflow will automatically:
+- Verify dependencies
+- Run code formatting checks
+- Run static analysis
+- Run tests with coverage reporting
+- Build a Docker image (but not push it)
+
 - [Contributor License Agreement](https://git.k8s.io/community/CLA.md) - Kubernetes projects require that you sign a Contributor License Agreement (CLA) before we can accept your pull requests
 - [Kubernetes Contributor Guide](https://k8s.dev/guide) - Main contributor documentation, or you can just jump directly to the [contributing page](https://k8s.dev/docs/guide/contributing/)
 - [Contributor Cheat Sheet](https://k8s.dev/cheatsheet) - Common resources for existing developers

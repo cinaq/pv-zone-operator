@@ -62,7 +62,7 @@ jobs:
           context: .
           push: true
           tags: |
-            cinaq/pv-zone-operator:latest
-            cinaq/pv-zone-operator:${{ steps.get_version.outputs.VERSION }}
+            cinaq/pv-labels-operator:latest
+            cinaq/pv-labels-operator:${{ steps.get_version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
