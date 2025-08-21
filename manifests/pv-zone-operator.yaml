@@ -1,0 +1,71 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pv-zone-operator
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pv-zone-operator
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pv-zone-operator
+subjects:
+- kind: ServiceAccount
+  name: pv-zone-operator
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: pv-zone-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pv-zone-operator
+  namespace: kube-system
+  labels:
+    app: pv-zone-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pv-zone-operator
+  template:
+    metadata:
+      labels:
+        app: pv-zone-operator
+    spec:
+      serviceAccountName: pv-zone-operator
+      containers:
+      - name: pv-zone-operator
+        image: docker.io/cinaq/pv-zone-operator:v0.1.0
+        args:
+        - --kubeconfig=/etc/kubernetes/kubeconfig
+        - --resync-period=10m
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      nodeSelector:
+        kubernetes.io/os: linux

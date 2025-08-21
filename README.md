@@ -1,4 +1,4 @@
-# PV Zone Operator
+# Kubernetes PV Labeler Operator
 
 Kubernetes operator that automatically labels PersistentVolumes with zone information based on the node where the pod using the PV is running.
 
