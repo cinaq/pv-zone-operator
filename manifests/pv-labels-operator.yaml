@@ -56,7 +56,7 @@ spec:
       serviceAccountName: pv-labels-operator
       containers:
       - name: pv-labels-operator
-        image: docker.io/cinaq/pv-labels-operator:0.1.1
+        image: docker.io/cinaq/pv-labels-operator:latest
         args:
         - --resync-period=60m
         resources:

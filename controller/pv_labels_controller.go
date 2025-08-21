@@ -390,47 +390,73 @@ func (c *PVLabelsController) findPodsUsingPVC(pvc *corev1.PersistentVolumeClaim)
 
 // updatePVWithTopologyLabels updates the PV with the zone and region labels
 func (c *PVLabelsController) updatePVWithTopologyLabels(pv *corev1.PersistentVolume, zone, region string) error {
-	// Check if the PV already has the correct topology labels
-	needsUpdate := false
-
-	// Clone the PV to avoid modifying the cache
-	pvCopy := pv.DeepCopy()
-
-	// Initialize labels map if it doesn't exist
-	if pvCopy.Labels == nil {
-		pvCopy.Labels = make(map[string]string)
+	// Implement retry logic with exponential backoff
+	backoff := wait.Backoff{
+		Duration: 100 * time.Millisecond,
+		Factor:   2.0,
+		Jitter:   0.1,
+		Steps:    5, // Maximum 5 retries
+		Cap:      30 * time.Second,
 	}
 
-	// Check and set the zone label if provided
-	if zone != "" {
-		if value, ok := pv.Labels[TopologyZoneLabel]; !ok || value != zone {
-			pvCopy.Labels[TopologyZoneLabel] = zone
-			needsUpdate = true
+	var lastErr error
+	err := wait.ExponentialBackoff(backoff, func() (bool, error) {
+		// Get the latest version of the PV
+		latestPV, err := c.kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), pv.Name, metav1.GetOptions{})
+		if err != nil {
+			lastErr = fmt.Errorf("error getting latest PV %s: %v", pv.Name, err)
+			return false, nil // Don't return error to allow retry
 		}
-	}
 
-	// Check and set the region label if provided
-	if region != "" {
-		if value, ok := pv.Labels[TopologyRegionLabel]; !ok || value != region {
-			pvCopy.Labels[TopologyRegionLabel] = region
-			needsUpdate = true
+		// Check if the PV already has the correct topology labels
+		needsUpdate := false
+
+		// Clone the PV to avoid modifying the cache
+		pvCopy := latestPV.DeepCopy()
+
+		// Initialize labels map if it doesn't exist
+		if pvCopy.Labels == nil {
+			pvCopy.Labels = make(map[string]string)
 		}
-	}
 
-	// If no update is needed, return early
-	if !needsUpdate {
-		klog.V(4).Infof("PV %s already has correct topology labels", pv.Name)
-		return nil
-	}
+		// Check and set the zone label if provided
+		if zone != "" {
+			if value, ok := latestPV.Labels[TopologyZoneLabel]; !ok || value != zone {
+				pvCopy.Labels[TopologyZoneLabel] = zone
+				needsUpdate = true
+			}
+		}
 
-	// Update the PV
-	_, err := c.kubeClient.CoreV1().PersistentVolumes().Update(context.TODO(), pvCopy, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("error updating PV %s: %v", pv.Name, err)
-	}
+		// Check and set the region label if provided
+		if region != "" {
+			if value, ok := latestPV.Labels[TopologyRegionLabel]; !ok || value != region {
+				pvCopy.Labels[TopologyRegionLabel] = region
+				needsUpdate = true
+			}
+		}
 
-	klog.Infof("Successfully updated PV %s with topology labels", pv.Name)
-	return nil
+		// If no update is needed, return early
+		if !needsUpdate {
+			klog.V(4).Infof("PV %s already has correct topology labels", pv.Name)
+			return true, nil
+		}
+
+		// Update the PV
+		_, err = c.kubeClient.CoreV1().PersistentVolumes().Update(context.TODO(), pvCopy, metav1.UpdateOptions{})
+		if err != nil {
+			lastErr = fmt.Errorf("error updating PV %s: %v", pv.Name, err)
+			klog.V(2).Infof("Failed to update PV %s, will retry: %v", pv.Name, err)
+			return false, nil // Don't return error to allow retry
+		}
+
+		klog.Infof("Successfully updated PV %s with topology labels", pv.Name)
+		return true, nil
+	})
+
+	if err == wait.ErrWaitTimeout {
+		return fmt.Errorf("timed out updating PV %s with topology labels: %v", pv.Name, lastErr)
+	}
+	return err
 }
 
 // isPodReady returns true if a pod is ready; false otherwise.
