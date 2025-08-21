@@ -14,7 +14,7 @@ all: test docker-build
 
 # Run tests
 test: fmt vet
-	go test ./...
+	go test -v ./...
 
 # Run against the configured Kubernetes cluster in ~/.kube/config
 run: generate fmt vet manifests

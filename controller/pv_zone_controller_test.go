@@ -668,6 +668,195 @@ func TestProcessPVCWithReadyPod(t *testing.T) {
 	f.run("default/test-pvc")
 }
 
+func TestFindPodsUsingPVC(t *testing.T) {
+	f := newFixture(t)
+
+	// Create test resources
+	pvc1 := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pvc-1",
+			Namespace: "default",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "test-pv-1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+
+	// Create pods using the PVC
+	pod1 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-1",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-1",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1",
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-2",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-2",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1", // Same PVC as pod1
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	// Create a pod with a different PVC
+	pod3 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-3",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-3",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-2", // Different PVC
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Create a pod with no PVC
+	pod4 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-4",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-4",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Create a pod in a different namespace
+	pod5 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod-5",
+			Namespace: "other-namespace",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "test-node-1",
+			Volumes: []corev1.Volume{
+				{
+					Name: "test-volume-5",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-pvc-1", // Same name as pvc1 but in different namespace
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	// Add objects to the fixture
+	f.kubeObjects = append(f.kubeObjects, pvc1, pod1, pod2, pod3, pod4, pod5)
+
+	// Create controller
+	controller, _ := f.newController()
+
+	// Test findPodsUsingPVC function
+	pods, err := controller.findPodsUsingPVC(pvc1)
+	if err != nil {
+		t.Errorf("Error finding pods using PVC: %v", err)
+	}
+
+	// Verify the correct pods were found
+	if len(pods) != 2 {
+		t.Errorf("Expected 2 pods using PVC, got %d", len(pods))
+	}
+
+	// Create a map of pod names for easier verification
+	podNames := make(map[string]bool)
+	for _, pod := range pods {
+		podNames[pod.Name] = true
+	}
+
+	// Check that pod1 and pod2 are in the result
+	if !podNames["test-pod-1"] {
+		t.Errorf("Expected pod test-pod-1 to be found")
+	}
+	if !podNames["test-pod-2"] {
+		t.Errorf("Expected pod test-pod-2 to be found")
+	}
+
+	// Check that pod3, pod4, and pod5 are NOT in the result
+	if podNames["test-pod-3"] {
+		t.Errorf("Pod test-pod-3 should not be found (different PVC)")
+	}
+	if podNames["test-pod-4"] {
+		t.Errorf("Pod test-pod-4 should not be found (no PVC)")
+	}
+	if podNames["test-pod-5"] {
+		t.Errorf("Pod test-pod-5 should not be found (different namespace)")
+	}
+}
+
 func TestPeriodicScanAllPods(t *testing.T) {
 	f := newFixture(t)
 

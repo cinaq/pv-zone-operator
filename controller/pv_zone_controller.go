@@ -7,9 +7,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/runtime"
+	apimachruntime "k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
 
@@ -28,6 +33,14 @@ type PVZoneController struct {
 
 	// resyncPeriod is the period for full resync of all pods
 	resyncPeriod time.Duration
+
+	// Informers and listers
+	podInformer cache.SharedIndexInformer
+	podLister   v1.PodLister
+	podsSynced  cache.InformerSynced
+
+	// workqueue is a rate limited work queue that handles pod events
+	workqueue workqueue.RateLimitingInterface
 }
 
 // NewPVZoneController creates a new PVZoneController
@@ -35,22 +48,70 @@ func NewPVZoneController(
 	kubeClient kubernetes.Interface,
 	resyncPeriod time.Duration,
 ) *PVZoneController {
+	// Create pod informer
+	podInformer := cache.NewSharedIndexInformer(
+		&cache.ListWatch{
+			ListFunc: func(options metav1.ListOptions) (apimachruntime.Object, error) {
+				return kubeClient.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), options)
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				return kubeClient.CoreV1().Pods(metav1.NamespaceAll).Watch(context.TODO(), options)
+			},
+		},
+		&corev1.Pod{},
+		resyncPeriod,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+	)
+
 	controller := &PVZoneController{
 		kubeClient:   kubeClient,
 		resyncPeriod: resyncPeriod,
+		podInformer:  podInformer,
+		podLister:    v1.NewPodLister(podInformer.GetIndexer()),
+		podsSynced:   podInformer.HasSynced,
+		workqueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PVZoneController"),
 	}
+
+	// Set up event handlers for pod informer
+	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.enqueuePod,
+		UpdateFunc: func(old, new interface{}) {
+			oldPod := old.(*corev1.Pod)
+			newPod := new.(*corev1.Pod)
+			// Only process if pod transitions to Ready state
+			if !isPodReady(oldPod) && isPodReady(newPod) {
+				controller.enqueuePod(newPod)
+			}
+		},
+		// We don't need to handle delete events
+	})
 
 	return controller
 }
 
 // Run starts the controller and runs until stopCh is closed
 func (c *PVZoneController) Run(stopCh <-chan struct{}) error {
-	defer runtime.HandleCrash()
+	defer utilruntime.HandleCrash()
+	defer c.workqueue.ShutDown()
 
 	// Start the informer factories to begin populating the informer caches
 	klog.Info("Starting PV Zone controller")
 
-	// Start periodic scanning of all pods
+	// Start the pod informer
+	go c.podInformer.Run(stopCh)
+
+	// Wait for the caches to be synced before starting workers
+	klog.Info("Waiting for informer caches to sync")
+	if !cache.WaitForCacheSync(stopCh, c.podsSynced) {
+		return fmt.Errorf("failed to wait for caches to sync")
+	}
+
+	klog.Info("Starting workers")
+	// Start the worker to process pod events
+	go wait.Until(c.runWorker, time.Second, stopCh)
+	klog.Info("Started workers")
+
+	// Also keep the periodic scanning as a fallback mechanism
 	go wait.Until(c.periodicScanAllPods, c.resyncPeriod, stopCh)
 	klog.Infof("Started periodic pod scanner with period %v", c.resyncPeriod)
 
@@ -90,7 +151,97 @@ func (c *PVZoneController) periodicScanAllPods() {
 	klog.Info("Completed periodic scan of all pods")
 }
 
-// We no longer need worker or queue processing functions as we're using polling
+// runWorker is a long-running function that will continually call the
+// processNextWorkItem function in order to read and process a message on the workqueue.
+func (c *PVZoneController) runWorker() {
+	for c.processNextWorkItem() {
+	}
+}
+
+// processNextWorkItem will read a single work item off the workqueue and
+// attempt to process it, by calling the processPod method.
+func (c *PVZoneController) processNextWorkItem() bool {
+	obj, shutdown := c.workqueue.Get()
+
+	if shutdown {
+		return false
+	}
+
+	// We wrap this block in a func so we can defer c.workqueue.Done.
+	err := func(obj interface{}) error {
+		// We call Done here so the workqueue knows we have finished
+		// processing this item. We also must remember to call Forget if we
+		// do not want this work item being re-queued. For example, we do
+		// not call Forget if a transient error occurs, instead the item is
+		// put back on the workqueue and attempted again after a back-off
+		// period.
+		defer c.workqueue.Done(obj)
+		var key string
+		var ok bool
+		// We expect strings to come off the workqueue. These are of the
+		// form namespace/name. We do this as the delayed nature of the
+		// workqueue means the items in the informer cache may actually be
+		// more up to date that when the item was initially put onto the
+		// workqueue.
+		if key, ok = obj.(string); !ok {
+			// As the item in the workqueue is actually invalid, we call
+			// Forget here else we'd go into a loop of attempting to
+			// process a work item that is invalid.
+			c.workqueue.Forget(obj)
+			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
+			return nil
+		}
+		// Run the processPodByKey, passing it the namespace/name string of the Pod resource to be processed
+		if err := c.processPodByKey(key); err != nil {
+			// Put the item back on the workqueue to handle any transient errors
+			c.workqueue.AddRateLimited(key)
+			return fmt.Errorf("error processing '%s': %s, requeuing", key, err.Error())
+		}
+		// Finally, if no error occurs we Forget this item so it does not
+		// get queued again until another change happens.
+		c.workqueue.Forget(obj)
+		klog.Infof("Successfully processed '%s'", key)
+		return nil
+	}(obj)
+
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+
+	return true
+}
+
+// enqueuePod takes a Pod resource and converts it into a namespace/name
+// string which is then put onto the work queue.
+func (c *PVZoneController) enqueuePod(obj interface{}) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.Add(key)
+}
+
+// processPodByKey processes a pod from the key in the workqueue
+func (c *PVZoneController) processPodByKey(key string) error {
+	// Convert the namespace/name string into a distinct namespace and name
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return fmt.Errorf("invalid resource key: %s", key)
+	}
+
+	// Get the Pod resource with this namespace/name
+	pod, err := c.podLister.Pods(namespace).Get(name)
+	if err != nil {
+		// The Pod resource may no longer exist, in which case we stop processing
+		return nil
+	}
+
+	// Process the pod to update PVs with zone information
+	return c.processPod(pod)
+}
 
 // processPod processes a pod to find its PVCs and label the corresponding PVs
 func (c *PVZoneController) processPod(pod *corev1.Pod) error {
